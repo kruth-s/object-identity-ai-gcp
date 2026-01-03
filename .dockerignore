@@ -1,0 +1,16 @@
+# Docker ignore file
+__pycache__/
+*.py[cod]
+.Python
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+*.egg
+*.env
+.DS_Store
+
+# Optional: don't copy git metadata or ignore file into image
+.git
+.gitignore
