@@ -56,30 +56,101 @@ async def health():
     return {"status": "ok"}
 
 
+# Prefer Vertex AI SDK for Gemini Vision; fall back to google.generativeai if available
+try:
+    from vertexai.generative_models import GenerativeModel, Image
+    VERTEX_AVAILABLE = True
+except Exception:
+    VERTEX_AVAILABLE = False
+
+try:
+    import google.generativeai as genai_module
+    from google.generativeai.types import GenerationConfig
+    GENAI_AVAILABLE = True
+except Exception:
+    genai_module = None
+    GenerationConfig = None
+    GENAI_AVAILABLE = False
+
+
 def analyze_with_gemini(gcs_uri: str) -> dict:
-    """Call Gemini (Vertex AI) to analyze an image at the given GCS URI.
-    Returns a dict with keys `ok`, `summary`, and `raw` (or `error`).
+    """Call Gemini Vision on normalized GCS image and return structured JSON.
+
+    Prefers Vertex AI SDK (GenerativeModel + Image), falls back to google.generativeai.
+    Returns a dict with expected keys (semantics, ghost_signals, wear_patterns, manufacturing_cues,
+    semantic_class, confidence, explanation) or an `error` key on failure.
     """
-    try:
-        prompt = f"Describe the image at {gcs_uri}. Provide objects with approximate confidences and a short summary."
-        # Use the full Vertex model resource path so Vertex picks the right project/location
-        model_full = f"projects/{PROJECT_ID}/locations/{LOCATION}/models/{GEMINI_MODEL}"
-        response = client.predict(
-            model=model_full,
-            input=[{"image": {"image_uri": gcs_uri}, "text": prompt}]
-        )
+    prompt = """
+    Analyze this object image for identity matching. Return ONLY valid JSON with these keys:
+    {
+      "semantics": "high-level description",
+      "ghost_signals": ["shadows", "reflections", "perspective"],
+      "wear_patterns": "scratches, tears, fraying",
+      "manufacturing_cues": "micro-textures, grain patterns",
+      "semantic_class": "bag/backpack/etc",
+      "confidence": 0.85,
+      "explanation": "2-3 sentences why these are unique identifiers"
+    }
+    """
 
-        # Try to extract a readable summary from the response
-        summary = None
-        if hasattr(response, 'candidates') and response.candidates:
-            cand = response.candidates[0]
-            summary = getattr(cand, 'content', str(cand))
-        else:
-            summary = str(response)
+    # Try Vertex AI SDK first
+    if VERTEX_AVAILABLE:
+        try:
+            model = GenerativeModel(GEMINI_MODEL)
+            img = Image.from_uri(gcs_uri)
+            response = model.generate_content([prompt, img])
+            text = getattr(response, 'text', str(response))
 
-        return {"ok": True, "summary": summary, "raw": response}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            # Extract JSON object from response text
+            import re, json
+            m = re.search(r"(\{.*\})", text, re.S)
+            if m:
+                return json.loads(m.group(1))
+            else:
+                return {"error": "Could not parse JSON from Vertex response", "raw": text}
+        except Exception as e:
+            return {"error": f"Vertex SDK error: {e}"}
+
+    # Fall back to google.generativeai
+    if GENAI_AVAILABLE:
+        try:
+            genai_module.configure(
+                api_key="unused",
+                transport="rest",
+                client_options={
+                    "api_endpoint": f"{LOCATION}-aiplatform.googleapis.com",
+                    "api_version": "v1",
+                }
+            )
+
+            model = genai_module.GenerativeModel(
+                model_name=GEMINI_MODEL,
+                generation_config=GenerationConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    max_output_tokens=300,
+                )
+            )
+
+            # Upload or reference the image; genai.upload_file accepts GCS URIs in newer versions
+            try:
+                img_part = genai_module.upload_file(path=gcs_uri)
+            except Exception:
+                img_part = gcs_uri
+
+            response = model.generate_content([prompt, img_part])
+            text = getattr(response, 'text', str(response))
+
+            import re, json
+            m = re.search(r"(\{.*\})", text, re.S)
+            if m:
+                return json.loads(m.group(1))
+            else:
+                return {"error": "Could not parse JSON from genai response", "raw": text}
+        except Exception as e:
+            return {"error": f"genai error: {e}"}
+
+    return {"error": "No supported Gemini client installed (install vertexai or google-generativeai)"}
 
 
 @app.post("/analyze")
