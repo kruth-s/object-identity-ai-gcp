@@ -1,6 +1,8 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
-
+import os
+BUCKET_NAME = os.environ.get("BUCKET_NAME", f"object-identity-images-{os.environ.get('GOOGLE_CLOUD_PROJECT')}")
+    
 app = FastAPI()
 
 @app.get("/health")
