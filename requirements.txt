@@ -9,23 +9,23 @@ google-cloud-aiplatform==1.63.0
 google-genai==0.5.0
 
 # Core numerics and CV
-numpy==2.1.1
+numpy<2.0
 opencv-python-headless==4.10.0.84
 Pillow==10.4.0
 mediapipe==0.10.14
 scikit-image==0.24.0
 
-# PyTorch ecosystem (for ViT + Grad-CAM explainability)
-torch==2.4.1
+# PyTorch ecosystem (ViT + Grad-CAM)
+torch==2.2.2
 timm==1.0.9
-pytorch-grad-cam==1.5.0
+grad-cam>=1.4.8
 
-# TensorFlow ecosystem (for Bayesian fusion w/ TFP)
+# TensorFlow ecosystem (Bayesian fusion)
 tensorflow==2.15.0
 tensorflow-probability==0.23.0
 
-# Optional: CLIP (if branch_a is used)
-clip-by-openai==0.0.2
+# CLIP (OpenAI official)
+git+https://github.com/openai/CLIP.git
 
-# Optional server
+# Server
 gunicorn==22.0.0

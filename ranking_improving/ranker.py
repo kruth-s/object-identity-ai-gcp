@@ -9,64 +9,74 @@ def rank_top_k_objects(
     k: int = 5,
     fetch_limit: int = 200,
 ) -> list:
-    """
-    query_embeddings:
-      {
-        "semantic_embedding": [...],
-        "negative_space_128d": [...],
-        "mfg_embedding": [...] (optional)
-      }
-    query_meta:
-      {"timestamp": int, "location": {...}}
-    """
     ts_now = int(query_meta.get("timestamp", time.time()))
     q_loc = query_meta.get("location")
 
+    q_sem = query_embeddings.get("semantic_embedding")
+    q_neg = query_embeddings.get("negative_space_128d")
+    q_mfg = query_embeddings.get("mfg_embedding")
+
+    if not q_sem:
+        return []
+
     results = []
 
-    # Fallback retrieval: pull recent objects then compute cosine locally.
-    # (Upgrade to Firestore/Vertex vector KNN later.)
     for doc in list_candidate_objects(limit=fetch_limit):
-        obj = doc.to_dict()
+        obj = doc.to_dict() or {}
         obj_id = doc.id
 
         emb = obj.get("embeddings", {})
-        if not emb.get("semantic_embedding"):
+        sem_emb = emb.get("semantic_embedding")
+        neg_emb = emb.get("negative_space_128d")
+
+        if not sem_emb:
             continue
 
         sim_scores = {
-            "semantic": cosine_sim(query_embeddings["semantic_embedding"], emb["semantic_embedding"]),
-            "negative": cosine_sim(query_embeddings["negative_space_128d"], emb.get("negative_space_128d", query_embeddings["negative_space_128d"])),
+            "semantic": cosine_sim(q_sem, sem_emb),
+            "negative": cosine_sim(q_neg, neg_emb) if q_neg and neg_emb else 0.0,
         }
-        if query_embeddings.get("mfg_embedding") and emb.get("mfg_embedding"):
-            sim_scores["mfg"] = cosine_sim(query_embeddings["mfg_embedding"], emb["mfg_embedding"])
 
-        # Similarity weights (tuneable)
-        sim = blend_similarity(sim_scores, weights={"semantic": 0.65, "negative": 0.25, "mfg": 0.10})
+        if q_mfg and emb.get("mfg_embedding"):
+            sim_scores["mfg"] = cosine_sim(
+                q_mfg, emb.get("mfg_embedding")
+            )
 
-        # Time/location terms
+        sim = blend_similarity(
+            sim_scores,
+            weights={"semantic": 0.65, "negative": 0.25, "mfg": 0.10},
+        )
+
         ts_old = int(obj.get("updated_at", ts_now))
         tscore = time_decay_score(ts_now, ts_old, half_life_hours=72.0)
         lscore = location_consistency_score(q_loc, obj.get("location"))
 
-        # Use object’s historical confidence
         obj_conf = float(obj.get("object_confidence", 0.5))
 
-        # Final match probability (bounded)
-        match_prob = max(0.0, min(1.0, 0.55 * sim + 0.20 * obj_conf + 0.15 * tscore + 0.10 * lscore))
+        match_prob = max(
+            0.0,
+            min(
+                1.0,
+                0.55 * sim
+                + 0.20 * obj_conf
+                + 0.15 * tscore
+                + 0.10 * lscore,
+            ),
+        )
 
-        results.append({
-            "object_id": obj_id,
-            "match_probability": round(match_prob, 3),
-            "similarity": round(sim, 3),
-            "location_consistency_score": round(lscore, 3),
-            "time_decay_score": round(tscore, 3),
-        })
+        results.append(
+            {
+                "object_id": obj_id,
+                "match_probability": round(match_prob, 3),
+                "similarity": round(sim, 3),
+                "location_consistency_score": round(lscore, 3),
+                "time_decay_score": round(tscore, 3),
+            }
+        )
 
     results.sort(key=lambda x: x["match_probability"], reverse=True)
     top = results[:k]
 
-    # Add ranks
     for i, r in enumerate(top, start=1):
         r["rank"] = i
 

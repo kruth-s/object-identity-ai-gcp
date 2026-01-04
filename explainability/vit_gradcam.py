@@ -1,46 +1,95 @@
 import numpy as np
 import torch
 import timm
+import logging
 
-# pip: pytorch-grad-cam
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import preprocess_image
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# -------------------------------------------------------------------
+# Force CPU (Cloud Run safe)
+# -------------------------------------------------------------------
 
-# Load once at startup (same as your manufacturing ViT, but here we use it for explainability)
-_vit = timm.create_model("vit_base_patch16_224", pretrained=True)
-_vit.eval()
-_vit.to(device)
+_DEVICE = torch.device("cpu")
+
+_vit = None
+_cam = None
+
+
+def _load_vit():
+    global _vit
+    if _vit is None:
+        _vit = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=True,
+        )
+        _vit.eval()
+        _vit.to(_DEVICE)
+    return _vit
+
 
 def _reshape_transform(tensor, height=14, width=14):
     """
-    ViT tokens -> feature map:
-    tensor: [B, tokens, C]
-    drop CLS token then reshape to [B, C, H, W]
+    ViT tokens → [B, C, H, W]
     """
-    result = tensor[:, 1:, :].reshape(tensor.size(0), height, width, tensor.size(2))
-    result = result.transpose(2, 3).transpose(1, 2)  # [B, C, H, W]
+    result = tensor[:, 1:, :]  # drop CLS token
+    result = result.reshape(
+        result.size(0),
+        height,
+        width,
+        result.size(2),
+    )
+    result = result.permute(0, 3, 1, 2)
     return result
 
-def vit_gradcam_heatmap(rgb_float01: np.ndarray, target_category: int | None = None) -> np.ndarray:
+
+def _get_cam():
+    global _cam
+    if _cam is None:
+        vit = _load_vit()
+        _cam = GradCAM(
+            model=vit,
+            target_layers=[vit.blocks[-1].norm1],
+            reshape_transform=_reshape_transform,
+        )
+    return _cam
+
+
+def vit_gradcam_heatmap(rgb_float01: np.ndarray) -> np.ndarray:
     """
-    Input: rgb image float32 in [0,1], shape [H,W,3]
-    Output: grayscale_cam float32 in [0,1], shape [H,W]
+    Input: RGB float32 [H,W,3] in [0,1]
+    Output: grayscale CAM [H,W] in [0,1]
     """
-    input_tensor = preprocess_image(
-        rgb_float01,
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-    ).to(device)
+    try:
+        # Resize input for ViT (224x224)
+        import torch.nn.functional as F
+        
+        input_tensor = preprocess_image(
+            rgb_float01,
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ).to(_DEVICE)
 
-    target_layers = [_vit.blocks[-1].norm1]
+        # Resize to 224x224 if needed
+        if input_tensor.shape[2:] != (224, 224):
+            input_tensor = F.interpolate(
+                input_tensor,
+                size=(224, 224),
+                mode="bilinear",
+                align_corners=False
+            )
 
-    cam = GradCAM(
-        model=_vit,
-        target_layers=target_layers,
-        reshape_transform=_reshape_transform,
-    )
+        cam = _get_cam()
 
-    grayscale_cam = cam(input_tensor=input_tensor, target_category=target_category)
-    return grayscale_cam[0].astype(np.float32)
+        # ✅ NEW API — NO target_category
+        grayscale_cam = cam(
+            input_tensor=input_tensor,
+            targets=None,
+        )
+
+        return grayscale_cam[0].astype(np.float32)
+
+    except Exception:
+        logging.exception("Grad-CAM failed")
+        h, w = rgb_float01.shape[:2]
+        return np.zeros((h, w), dtype=np.float32)

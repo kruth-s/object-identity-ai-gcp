@@ -1,18 +1,29 @@
 import os
-import uuid
-import vertexai
-from vertexai.preview.vision_models import Image, ImageGenerationModel
+import logging
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
-LOCATION = os.environ.get("IMAGEN_LOCATION", "us-central1")  # Imagen often available in us-central1
-IMAGEN_MODEL = os.environ.get("IMAGEN_MODEL", "imagegeneration@002")  # Imagen v.002 editing sample [web:97]
+IMAGEN_LOCATION = os.environ.get("IMAGEN_LOCATION", "us-central1")
+IMAGEN_MODEL = os.environ.get("IMAGEN_MODEL", "imagegeneration@002")
 
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+_vertex_initialized = False
+_imagen_model = None
 
-_model = ImageGenerationModel.from_pretrained(IMAGEN_MODEL)
 
-def _to_vx_image(image_bytes: bytes) -> Image:
-    return Image(image_bytes=image_bytes)
+def _init_vertex():
+    global _vertex_initialized
+    if not _vertex_initialized:
+        import vertexai
+        vertexai.init(project=PROJECT_ID, location=IMAGEN_LOCATION)
+        _vertex_initialized = True
+
+
+def _get_imagen_model():
+    global _imagen_model
+    if _imagen_model is None:
+        from vertexai.preview.vision_models import ImageGenerationModel
+        _imagen_model = ImageGenerationModel.from_pretrained(IMAGEN_MODEL)
+    return _imagen_model
+
 
 def imagen_inpaint_completions(
     base_jpg_bytes: bytes,
@@ -23,15 +34,25 @@ def imagen_inpaint_completions(
     """
     Returns a list of Vertex Image objects (completions).
     """
-    base_img = _to_vx_image(base_jpg_bytes)
-    mask_img = _to_vx_image(mask_png_bytes)
+    try:
+        _init_vertex()
+        model = _get_imagen_model()
 
-    images = _model.edit_image(
-        base_image=base_img,
-        mask=mask_img,
-        prompt=prompt,
-        guidance_scale=21,      # strong prompt adherence [web:97]
-        number_of_images=n,
-        seed=1,
-    )
-    return images
+        from vertexai.preview.vision_models import Image
+
+        base_img = Image(image_bytes=base_jpg_bytes)
+        mask_img = Image(image_bytes=mask_png_bytes)
+
+        images = model.edit_image(
+            base_image=base_img,
+            mask=mask_img,
+            prompt=prompt,
+            guidance_scale=21,
+            number_of_images=n,
+            seed=1,
+        )
+        return images
+
+    except Exception as e:
+        logging.exception("Imagen inpainting failed")
+        return []
