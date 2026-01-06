@@ -67,6 +67,7 @@ def build_visual_identity_confidence(
 
         return {
             "heatmap_url": heatmap_gcs_uri,
+            "heatmap_object_path": heatmap_object_path,
             "gemini_explanation": gemini_json,
             "xai_notes": (
                 "Grad-CAM is an approximate saliency method; "
@@ -81,6 +82,7 @@ def build_visual_identity_confidence(
         logging.exception("Explainability pipeline failed")
         return {
             "heatmap_url": None,
+            "heatmap_object_path": None,
             "gemini_explanation": {},
             "xai_notes": "",
             "interpretation": f"error: {e}",

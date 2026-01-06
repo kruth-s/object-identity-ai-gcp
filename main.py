@@ -91,7 +91,40 @@ def get_storage():
     # Default: use real GCS client
     try:
         _storage_client = storage.Client()
-        _bucket = _storage_client.bucket(BUCKET_NAME)
+        # Verify the bucket exists before returning it to avoid runtime 404s.
+        existing_bucket = _storage_client.lookup_bucket(BUCKET_NAME)
+        if existing_bucket is None:
+            logging.error(
+                f"GCS bucket '{BUCKET_NAME}' not found in project '{PROJECT_ID}'; falling back to local storage"
+            )
+            # Fallback to local filesystem if the bucket isn't present
+            root = os.path.join(os.getcwd(), "local_data", BUCKET_NAME)
+            os.makedirs(root, exist_ok=True)
+
+            class LocalBlob:
+                def __init__(self, root_dir: str, name: str):
+                    self._root = root_dir
+                    self._name = name
+                    self.name = name
+
+                def upload_from_string(self, data: bytes, content_type: str | None = None):
+                    path = os.path.join(self._root, self._name.replace("/", os.sep))
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    return True
+
+            class LocalBucket:
+                def __init__(self, root_dir: str):
+                    self._root = root_dir
+
+                def blob(self, name: str):
+                    return LocalBlob(self._root, name)
+
+            _bucket = LocalBucket(root)
+            return _bucket
+
+        _bucket = existing_bucket
         return _bucket
     except Exception as e:
         logging.exception(f"GCS storage init failed: {e}")
@@ -225,6 +258,7 @@ def store_analysis_in_firestore(
     gcs_uri: str,
     branches: dict,
     fusion_result: dict,
+    normalization: dict | None = None,
 ):
     db = get_firestore()
     doc_ref = (
@@ -234,17 +268,20 @@ def store_analysis_in_firestore(
         .document(str(ts))
     )
 
-    doc_ref.set(
-        {
-            "timestamp": ts,
-            "filename": filename,
-            "image_uri": gcs_uri,
-            "branches": branches,
-            "fusion_result": fusion_result,
-            "confirmed": None,
-            "created_at": firestore.SERVER_TIMESTAMP,
-        }
-    )
+    payload = {
+        "timestamp": ts,
+        "filename": filename,
+        "image_uri": gcs_uri,
+        "branches": branches,
+        "fusion_result": fusion_result,
+        "confirmed": None,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+
+    if normalization is not None:
+        payload["normalization"] = normalization
+
+    doc_ref.set(payload)
 
 # -------------------------------------------------------------------
 # Main analysis endpoint
@@ -268,10 +305,42 @@ async def analyze(file: UploadFile = File(...)):
         )
 
         # 2) Normalize
-        norm_bytes = normalize_image(raw_bytes)
+        norm_bytes, normalization_meta = normalize_image(raw_bytes)
+
+        # Guard: ensure normalized image is bytes (handle accidental tuple/array returns)
+        # - If normalize_image returned a tuple accidentally, take the second element
+        # - If a numpy array-like, convert via tobytes()
+        if isinstance(norm_bytes, tuple):
+            # defensive: some versions mistakenly return (meta, bytes)
+            norm_bytes = norm_bytes[1]
+        if hasattr(norm_bytes, "tobytes"):
+            try:
+                norm_bytes = norm_bytes.tobytes()
+            except Exception:
+                # Fall through; type check below will raise useful error
+                pass
+        if not isinstance(norm_bytes, (bytes, bytearray)):
+            raise TypeError(
+                f"normalize_image returned {type(norm_bytes)}; expected bytes or bytearray"
+            )
+
+        # Safe log (no raw binary in logs)
+        try:
+            import hashlib
+
+            logging.info(
+                "[%s] normalized image: len=%d sha1=%s",
+                uid,
+                len(norm_bytes),
+                hashlib.sha1(norm_bytes).hexdigest(),
+            )
+        except Exception:
+            logging.info("[%s] normalized image available (len=%d)", uid, len(norm_bytes))
+
         norm_name = f"normalized/{ts}_{uid}.jpg"
+        # Ensure upload is passed bytes
         bucket.blob(norm_name).upload_from_string(
-            norm_bytes, content_type="image/jpeg"
+            bytes(norm_bytes), content_type="image/jpeg"
         )
 
         gcs_uri = f"gs://{BUCKET_NAME}/{norm_name}"
@@ -365,6 +434,7 @@ async def analyze(file: UploadFile = File(...)):
                 gcs_uri=gcs_uri,
                 branches=sanitized_branches,
                 fusion_result=fusion_result,
+                normalization=normalization_meta,
             )
         except Exception:
             logging.exception("Firestore write failed")
@@ -385,7 +455,10 @@ async def analyze(file: UploadFile = File(...)):
                 "heatmap_object_path": explainability.get("heatmap_object_path"),
             },
             "embeddings_ref": embeddings_ref,
-            "top_k": top_k,
+            "top_k": [
+                {"object_id": t.get("object_id"), "score": t.get("match_probability", t.get("score"))}
+                for t in top_k
+            ],
         }
         if DEBUG:
             logging.debug(sanitize_for_logs(response_payload))

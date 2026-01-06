@@ -21,10 +21,11 @@ def run_fusion(branches_dict: dict) -> dict:
     uncertainty = "low" if (ci[1] - ci[0]) < 0.2 else "high"
 
     return {
-        "probability_same_object": result.p_final,
-        "confidence_score": result.p_final,
-        "confidence_interval": ci,
-        "branch_weights": result.weights,
-        "uncertainty_level": uncertainty,
-        "method": result.method,
-    }
+            "probability_same_object": result.p_final,
+            "confidence": result.p_final,
+            "confidence_score": result.p_final,
+            "confidence_interval": ci,
+            "branch_weights": result.weights,
+            "uncertainty_level": uncertainty,
+            "method": result.method,
+        }
