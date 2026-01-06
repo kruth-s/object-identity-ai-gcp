@@ -9,6 +9,7 @@ from explainability.gemini_explanations import (
     gemini_explain_match_from_bytes,
 )
 
+import os
 
 def build_visual_identity_confidence(
     norm_jpg_bytes: bytes,
@@ -30,15 +31,26 @@ def build_visual_identity_confidence(
         cam = vit_gradcam_heatmap(rgb)
         overlay_jpg = overlay_heatmap(rgb, cam, alpha=0.45)
 
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(heatmap_object_path)
-        blob.upload_from_string(
-            overlay_jpg,
-            content_type="image/jpeg",
-        )
-
+        local_dev = os.getenv("LOCAL_DEV", "false").lower() == "true" or os.getenv("GOOGLE_CLOUD_PROJECT") in (None, "", "unknown-project")
         heatmap_gcs_uri = f"gs://{bucket_name}/{heatmap_object_path}"
+
+        if local_dev:
+            root = os.path.join(os.getcwd(), "local_data", bucket_name)
+            os.makedirs(root, exist_ok=True)
+            path = os.path.join(root, heatmap_object_path.replace("/", os.sep))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(overlay_jpg)
+            heatmap_gcs_uri = f"file://{path}"
+        else:
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(heatmap_object_path)
+            blob.upload_from_string(
+                overlay_jpg,
+                content_type="image/jpeg",
+            )
+
 
         try:
             gemini_json = gemini_explain_match_from_bytes(

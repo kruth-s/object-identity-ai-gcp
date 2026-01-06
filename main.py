@@ -54,10 +54,73 @@ _bucket = None
 
 def get_storage():
     global _storage_client, _bucket
-    if _storage_client is None:
+    if _bucket is not None:
+        return _bucket
+
+    # Local filesystem fallback (no GCP credentials required)
+    local_dev = os.getenv("LOCAL_DEV", "false").lower() == "true" or PROJECT_ID == "unknown-project"
+
+    if local_dev:
+        root = os.path.join(os.getcwd(), "local_data", BUCKET_NAME)
+        os.makedirs(root, exist_ok=True)
+
+        class LocalBlob:
+            def __init__(self, root_dir: str, name: str):
+                self._root = root_dir
+                self._name = name
+                self.name = name
+
+            def upload_from_string(self, data: bytes, content_type: str | None = None):
+                path = os.path.join(self._root, self._name.replace("/", os.sep))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                mode = "wb"
+                with open(path, mode) as f:
+                    f.write(data)
+                return True
+
+        class LocalBucket:
+            def __init__(self, root_dir: str):
+                self._root = root_dir
+
+            def blob(self, name: str):
+                return LocalBlob(self._root, name)
+
+        _bucket = LocalBucket(root)
+        return _bucket
+
+    # Default: use real GCS client
+    try:
         _storage_client = storage.Client()
         _bucket = _storage_client.bucket(BUCKET_NAME)
-    return _bucket
+        return _bucket
+    except Exception as e:
+        logging.exception(f"GCS storage init failed: {e}")
+        # Final safety: fallback to local even if LOCAL_DEV not set
+        root = os.path.join(os.getcwd(), "local_data", BUCKET_NAME)
+        os.makedirs(root, exist_ok=True)
+
+        class LocalBlob:
+            def __init__(self, root_dir: str, name: str):
+                self._root = root_dir
+                self._name = name
+                self.name = name
+
+            def upload_from_string(self, data: bytes, content_type: str | None = None):
+                path = os.path.join(self._root, self._name.replace("/", os.sep))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(data)
+                return True
+
+        class LocalBucket:
+            def __init__(self, root_dir: str):
+                self._root = root_dir
+
+            def blob(self, name: str):
+                return LocalBlob(self._root, name)
+
+        _bucket = LocalBucket(root)
+        return _bucket
 
 def get_firestore():
     global _firestore_client
