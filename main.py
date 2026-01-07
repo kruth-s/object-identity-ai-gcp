@@ -5,8 +5,10 @@ import json
 import logging
 import google.auth
 from fastapi import FastAPI, File, UploadFile, Body
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from google.cloud import storage, firestore
+from firestore.router import router as firestore_router
 
 # -------------------------------------------------------------------
 # Environment
@@ -43,6 +45,20 @@ BUCKET_NAME = os.environ.get(
 # -------------------------------------------------------------------
 
 app = FastAPI()
+app.include_router(firestore_router)
+
+origins = [
+    "http://localhost:3000",  # your frontend
+    "https://your-production-domain.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or ["*"] for all origins (less secure)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------------------------------------------------
 # Lazy GCP clients
